@@ -1,5 +1,7 @@
 # Processed images
-data/processed/
+data/Processed/denoise/blurryPeople_20260130_175038.JPG
+data/Processed/denoise/highISO_20260130_171025.png
+
 
 # Specific raw images
 data/raw/blurryPeople.JPG
