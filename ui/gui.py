@@ -9,17 +9,18 @@ Displays raw images in a grid layout and allows image selection.
 import sys
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 import numpy as np
 import cv2
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QPushButton, QScrollArea, QMessageBox, QSpacerItem,
     QSizePolicy, QStackedWidget, QListWidget, QListWidgetItem, QGroupBox,
-    QSlider
+    QSlider, QCheckBox, QButtonGroup
 )
 from PyQt5.QtCore import QSize
 from PyQt5.QtGui import QPixmap, QFont, QImage
-from PyQt5.QtCore import Qt, pyqtSignal, QSize
+from PyQt5.QtCore import Qt, pyqtSignal, QSize, QTimer
 
 # Get the path to the data/raw folder
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -151,6 +152,8 @@ class ImageEditPage(QWidget):
         self.edited_pixmap = self.original_pixmap.copy()
         self.selected_technique = None
         self.slider_widgets = {}  # Store slider references for value retrieval
+        self.white_balance_method = None
+        self.zoom_factor = 1.0
         self.init_ui()
     
     def init_ui(self):
@@ -173,9 +176,13 @@ class ImageEditPage(QWidget):
         
         self.original_image_display = QLabel()
         self.original_image_display.setAlignment(Qt.AlignCenter)
-        self.original_image_display.setMinimumHeight(250)
         self.original_image_display.setStyleSheet("border: 1px solid #cccccc;")
-        left_layout.addWidget(self.original_image_display, 1)
+
+        self.original_scroll_area = QScrollArea()
+        self.original_scroll_area.setWidgetResizable(True)
+        self.original_scroll_area.setWidget(self.original_image_display)
+        self.original_scroll_area.setMinimumHeight(250)
+        left_layout.addWidget(self.original_scroll_area, 1)
         
         # Edited image section
         edited_label = QLabel("EDITED")
@@ -185,9 +192,28 @@ class ImageEditPage(QWidget):
         
         self.edited_image_display = QLabel()
         self.edited_image_display.setAlignment(Qt.AlignCenter)
-        self.edited_image_display.setMinimumHeight(250)
         self.edited_image_display.setStyleSheet("border: 1px solid #cccccc;")
-        left_layout.addWidget(self.edited_image_display, 1)
+
+        self.edited_scroll_area = QScrollArea()
+        self.edited_scroll_area.setWidgetResizable(True)
+        self.edited_scroll_area.setWidget(self.edited_image_display)
+        self.edited_scroll_area.setMinimumHeight(250)
+        left_layout.addWidget(self.edited_scroll_area, 1)
+
+        # Sync scroll between original and edited views
+        self._sync_scroll = False
+        self.original_scroll_area.verticalScrollBar().valueChanged.connect(
+            lambda value: self.sync_scrollbars(value, source="original")
+        )
+        self.edited_scroll_area.verticalScrollBar().valueChanged.connect(
+            lambda value: self.sync_scrollbars(value, source="edited")
+        )
+        self.original_scroll_area.horizontalScrollBar().valueChanged.connect(
+            lambda value: self.sync_scrollbars(value, source="original", horizontal=True)
+        )
+        self.edited_scroll_area.horizontalScrollBar().valueChanged.connect(
+            lambda value: self.sync_scrollbars(value, source="edited", horizontal=True)
+        )
         
         left_widget.setLayout(left_layout)
         main_layout.addWidget(left_widget, 2)  # 66% width
@@ -202,6 +228,34 @@ class ImageEditPage(QWidget):
         techniques_label.setFont(QFont('Arial', 11, QFont.Bold))
         techniques_label.setAlignment(Qt.AlignCenter)
         right_layout.addWidget(techniques_label)
+
+        # Zoom control
+        zoom_group = QGroupBox("Zoom")
+        zoom_layout = QVBoxLayout()
+        zoom_layout.setContentsMargins(8, 8, 8, 8)
+        zoom_layout.setSpacing(6)
+
+        zoom_row = QHBoxLayout()
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setMinimum(50)
+        self.zoom_slider.setMaximum(700)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.setSingleStep(10)
+
+        self.zoom_value_label = QLabel("100%")
+        self.zoom_value_label.setMinimumWidth(50)
+        self.zoom_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self.zoom_slider.valueChanged.connect(
+            lambda v: self.on_zoom_changed(v, self.zoom_value_label)
+        )
+
+        zoom_row.addWidget(self.zoom_slider)
+        zoom_row.addWidget(self.zoom_value_label)
+        zoom_layout.addLayout(zoom_row)
+
+        zoom_group.setLayout(zoom_layout)
+        right_layout.addWidget(zoom_group)
         
         # Techniques list
         self.techniques_list = QListWidget()
@@ -267,7 +321,7 @@ class ImageEditPage(QWidget):
         main_layout.addWidget(right_widget, 1)  # 33% width
         
         self.setLayout(main_layout)
-        self.update_images()
+        QTimer.singleShot(0, lambda: self.on_zoom_changed(self.zoom_slider.value(), self.zoom_value_label))
     
     def load_techniques(self):
         """Load available techniques from the techniques folder."""
@@ -297,6 +351,7 @@ class ImageEditPage(QWidget):
         
         # Clear slider widgets dictionary
         self.slider_widgets = {}
+        self.white_balance_method = None
         
         # Define parameters for each technique
         technique_params = {
@@ -321,10 +376,48 @@ class ImageEditPage(QWidget):
                     'magentas': {'min': -100, 'max': 100, 'default': 0, 'step': 1},
                     'yellows': {'min': -100, 'max': 100, 'default': 0, 'step': 1}
                 }
-            }
+            },
+            'White Balancing': {}
         }
         
         params = technique_params.get(technique_name, {})
+
+        if technique_name == 'White Balancing':
+            method_group = QGroupBox("Method")
+            method_layout = QVBoxLayout()
+
+            gray_world_toggle = QCheckBox(" Via Gray World Assumption")
+            gray_world_toggle.setTristate(False)
+            gray_world_toggle.setStyleSheet("""
+                QCheckBox::indicator {
+                    width: 50px;
+                    height: 28px;
+                }
+                QCheckBox::indicator:unchecked {
+                    border-radius: 14px;
+                    background: #e5e5ea;
+                    border: 1px solid #d1d1d6;
+                }
+                QCheckBox::indicator:checked {
+                    border-radius: 14px;
+                    background: #34c759;
+                    border: 1px solid #30b753;
+                }
+            """)
+
+            gray_world_toggle.setChecked(False)
+            self.white_balance_method = None
+
+            gray_world_toggle.toggled.connect(
+                lambda checked: self.set_white_balance_method("gray_world" if checked else None)
+            )
+            method_layout.addWidget(gray_world_toggle)
+            method_group.setLayout(method_layout)
+            self.parameters_layout.addWidget(method_group)
+
+            self.parameters_layout.addStretch()
+            self.parameters_scroll.setVisible(True)
+            return
         
         # Create Simplified section (expanded by default)
         if 'Simplified' in params:
@@ -361,6 +454,10 @@ class ImageEditPage(QWidget):
         
         # Show parameters section
         self.parameters_scroll.setVisible(True)
+
+    def set_white_balance_method(self, method: Optional[str]):
+        """Set the selected white balance method."""
+        self.white_balance_method = method
     
     def create_slider_widget(self, param_name: str, config: dict) -> QWidget:
         """Create a slider widget for a parameter."""
@@ -407,16 +504,48 @@ class ImageEditPage(QWidget):
         self.slider_widgets[param_name] = slider
         
         return container
+
+    def on_zoom_changed(self, value: int, label: QLabel):
+        """Handle zoom slider changes."""
+        adjusted_value = value - 1
+        self.zoom_factor = max(0.5, min(7.0, adjusted_value / 100.0))
+        label.setText(f"{value}%")
+        self.update_images()
+
+    def sync_scrollbars(self, value: int, source: str, horizontal: bool = False):
+        """Sync scroll positions between original and edited views."""
+        if self._sync_scroll:
+            return
+        self._sync_scroll = True
+        try:
+            if horizontal:
+                if source == "original":
+                    self.edited_scroll_area.horizontalScrollBar().setValue(value)
+                else:
+                    self.original_scroll_area.horizontalScrollBar().setValue(value)
+            else:
+                if source == "original":
+                    self.edited_scroll_area.verticalScrollBar().setValue(value)
+                else:
+                    self.original_scroll_area.verticalScrollBar().setValue(value)
+        finally:
+            self._sync_scroll = False
     
     def update_images(self):
         """Update the displayed images."""
-        # Scale images to fit the available space
+        # Scale images to fit the available space with zoom
+        original_base_height = max(250, self.original_scroll_area.viewport().height())
+        edited_base_height = max(250, self.edited_scroll_area.viewport().height())
+
+        original_target_height = int(original_base_height * self.zoom_factor)
+        edited_target_height = int(edited_base_height * self.zoom_factor)
+
         original_scaled = self.original_pixmap.scaledToHeight(
-            250,
+            original_target_height,
             Qt.SmoothTransformation
         )
         edited_scaled = self.edited_pixmap.scaledToHeight(
-            250,
+            edited_target_height,
             Qt.SmoothTransformation
         )
         
@@ -486,6 +615,22 @@ class ImageEditPage(QWidget):
                 colour_mixer.yellows = params.get('yellows', 0)
                 
                 result_image = colour_mixer.apply(bgr_image)
+            elif self.selected_technique == 'White Balancing':
+                if not self.white_balance_method:
+                    QMessageBox.warning(
+                        self,
+                        "No Method Selected",
+                        "Please select a white balance method first."
+                    )
+                    return
+
+                from techniques.white_balancing import WhiteBalancing
+                white_balancer = WhiteBalancing()
+                if self.white_balance_method == "gray_world":
+                    result_image = white_balancer.apply_gray_world(bgr_image)
+                else:
+                    QMessageBox.warning(self, "No Method Selected", "Please select a white balance method first.")
+                    return
             else:
                 QMessageBox.warning(self, "Error", f"Technique {self.selected_technique} not implemented.")
                 return
