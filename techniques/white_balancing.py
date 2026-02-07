@@ -24,6 +24,10 @@ class WhiteBalancing(ImageTechnique):
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
         l_channel, a_channel, b_channel = cv2.split(lab)
 
+        # Calculate Color Cast to measure how far the average colore deviates from neutral
+        # Positive a_shift: Image is too red
+        # Negative a_shift: Image is too green
+        # Same logic for blue-yellow on b channel
         # OpenCV Lab ranges: L [0,255], a/b [0,255] with 128 as neutral
         l_scaled = l_channel / 255.0 * 100.0
         a_shift = np.mean(a_channel - 128.0)
